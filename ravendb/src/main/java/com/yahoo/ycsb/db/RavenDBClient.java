@@ -34,18 +34,22 @@ import net.ravendb.client.documents.DocumentStore;
 import net.ravendb.client.documents.commands.*;
 import net.ravendb.client.documents.queries.IndexQuery;
 
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.security.KeyStore;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+
+//TODO: support for https
 /**
  * YCSB binding for RavenDB.
  */
 public class RavenDBClient extends DB {
 
   public static final String RAVENDB_URL = "ravendb.url";
-
   public static final String RAVENDB_DATABASE = "ravendb.database";
+  public static final String RAVENDB_CERTIFICATE = "ravendb.certificate";
 
   private static DocumentStore store;
   private static ObjectMapper mapper;
@@ -76,9 +80,17 @@ public class RavenDBClient extends DB {
       }
 
       String databaseName = props.getProperty(RAVENDB_DATABASE, "ycsb");
+      String certificatePath = props.getProperty(RAVENDB_CERTIFICATE, null);
 
       try {
         DocumentStore documentStore = new DocumentStore(urls.split(","), databaseName);
+
+        if (certificatePath != null) {
+          KeyStore clientStore = KeyStore.getInstance("PKCS12");
+          clientStore.load(new FileInputStream(certificatePath), "".toCharArray());
+          documentStore.setCertificate(clientStore);
+        }
+
         documentStore.initialize();
 
         System.out.println("ravendb client connection created with " + urls);
