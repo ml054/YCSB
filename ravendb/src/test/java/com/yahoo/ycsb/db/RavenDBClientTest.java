@@ -2,10 +2,11 @@ package com.yahoo.ycsb.db;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yahoo.ycsb.ByteIterator;
-import com.yahoo.ycsb.Status;
+import com.yahoo.ycsb.DBException;
 import com.yahoo.ycsb.StringByteIterator;
 import net.ravendb.client.Constants;
 import net.ravendb.client.documents.DocumentStore;
+import net.ravendb.client.documents.IDocumentStore;
 import net.ravendb.client.documents.operations.DeleteByQueryOperation;
 import net.ravendb.client.documents.queries.IndexQuery;
 import net.ravendb.client.documents.queries.Query;
@@ -30,11 +31,16 @@ public class RavenDBClientTest {
 
   @BeforeClass
   public static void setup() throws Exception {
+    setupWithBatch(1);
+  }
+
+  private static void setupWithBatch(int batchSize) throws DBException {
     client = new RavenDBClient();
 
     Properties p = new Properties();
     p.setProperty(RavenDBClient.RAVENDB_URL, TEST_RAVEN_URL);
     p.setProperty(RavenDBClient.RAVENDB_DATABASE, TEST_RAVEN_DATABASE);
+    p.setProperty("batchsize", String.valueOf(batchSize));
 
     client.setProperties(p);
     client.init();
@@ -46,17 +52,6 @@ public class RavenDBClientTest {
     IndexQuery query = new IndexQuery("from @all_docs");
     DeleteByQueryOperation operation = new DeleteByQueryOperation(query);
     store.operations().sendAsync(operation).waitForCompletion();
-  }
-
-  @Test
-  public void testRead() {
-    //use client to test read
-
-    Set<String> fields = new HashSet<>();
-    fields.add("FirstName");
-    fields.add("LastName");
-    Status result = client.read("users", "users/1", fields, /* TODO: */ null);
-    Assert.assertEquals(Status.OK, result);
   }
 
   @AfterClass
@@ -209,6 +204,66 @@ public class RavenDBClientTest {
     }
   }
 
-  //TODO: batch tests
+  @Test
+  public void insertBatchTest() throws Exception {
+    insertBatchTest(20);
+  }
 
+  @Test
+  public void insertPartialBatchTest() throws Exception {
+    insertBatchTest(19);
+  }
+
+  public void insertBatchTest(int numRows) throws Exception {
+
+    String database = RavenDBClient.getStore().getDatabase();
+    String[] urls = RavenDBClient.getStore().getUrls();
+
+    try (IDocumentStore testStore = new DocumentStore(urls, database)) {
+      testStore.initialize();
+
+
+
+      teardown();
+      setupWithBatch(10);
+      try {
+        String insertKey = "user0";
+        HashMap<String, ByteIterator> insertMap = insertRow(insertKey);
+        assertEquals(3, insertMap.size());
+
+        try (IDocumentSession session = RavenDBClient.getStore().openSession()) {
+          assertNumRows(0, testStore);
+        }
+
+        // insert more rows, completing 1 batch (still results are partial).
+        for (int i = 1; i < numRows; i++) {
+          insertMap = insertRow("user" + i);
+        }
+
+        assertNumRows(10 * (numRows / 10), testStore);
+
+        // call cleanup, which should insert the partial batch
+        client.cleanup();
+        // Prevent a teardown() from printing an error
+        client = null;
+
+        // Check that we have all rows
+        assertNumRows(numRows, testStore);
+
+      } catch (Exception e) {
+        e.printStackTrace();
+        fail("Failed insertBatchTest");
+      } finally {
+        teardown(); // for next tests
+        setup();
+      }
+    }
+  }
+
+  private void assertNumRows(long numRows, IDocumentStore testStore) {
+    try (IDocumentSession session = testStore.openSession()) {
+      assertEquals(numRows, session.query(ObjectNode.class, Query.collection(TABLE_NAME))
+          .count());
+    }
+  }
 }

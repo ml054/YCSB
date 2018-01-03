@@ -32,6 +32,9 @@ import com.yahoo.ycsb.*;
 import net.ravendb.client.Constants;
 import net.ravendb.client.documents.DocumentStore;
 import net.ravendb.client.documents.commands.*;
+import net.ravendb.client.documents.commands.batches.BatchCommand;
+import net.ravendb.client.documents.commands.batches.ICommandData;
+import net.ravendb.client.documents.commands.batches.PutCommandDataWithJson;
 import net.ravendb.client.documents.queries.IndexQuery;
 
 import java.io.FileInputStream;
@@ -40,8 +43,6 @@ import java.security.KeyStore;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-
-//TODO: support for https
 /**
  * YCSB binding for RavenDB.
  */
@@ -51,8 +52,13 @@ public class RavenDBClient extends DB {
   public static final String RAVENDB_DATABASE = "ravendb.database";
   public static final String RAVENDB_CERTIFICATE = "ravendb.certificate";
 
+  /** The batch size to use for inserts. */
+  private static int batchSize;
+
   private static DocumentStore store;
   private static ObjectMapper mapper;
+
+  private final List<ICommandData> bulkInserts = new ArrayList<ICommandData>();
 
   public static DocumentStore getStore() {
     return store;
@@ -81,6 +87,7 @@ public class RavenDBClient extends DB {
 
       String databaseName = props.getProperty(RAVENDB_DATABASE, "ycsb");
       String certificatePath = props.getProperty(RAVENDB_CERTIFICATE, null);
+      batchSize = Integer.parseInt(props.getProperty("batchsize", "1"));
 
       try {
         DocumentStore documentStore = new DocumentStore(urls.split(","), databaseName);
@@ -108,6 +115,13 @@ public class RavenDBClient extends DB {
 
   @Override
   public void cleanup() throws DBException {
+    if (!bulkInserts.isEmpty()) {
+      BatchCommand batchCommand = new BatchCommand(store.getConventions(), bulkInserts);
+      store.getRequestExecutor().execute(batchCommand);
+
+      bulkInserts.clear();
+    }
+
     if (INIT_COUNT.decrementAndGet() == 0) {
       try {
         store.close();
@@ -126,7 +140,6 @@ public class RavenDBClient extends DB {
     return table + "/" + key;
   }
 
-  //TODO: client side projection vs server side projection?
   @Override
   public Status read(String table, String key, Set<String> fields, HashMap<String, ByteIterator> result) {
     try {
@@ -136,7 +149,7 @@ public class RavenDBClient extends DB {
       store.getRequestExecutor().execute(command);
       GetDocumentsResult commandResult = command.getResult();
 
-      if (commandResult.getResults().size() > 0) {
+      if (commandResult != null && commandResult.getResults().size() > 0) {
         JsonNode json = commandResult.getResults().get(0);
         fillMap(json, result, fields);
         return Status.OK;
@@ -175,7 +188,6 @@ public class RavenDBClient extends DB {
     try {
       String documentId = documentId(table, startkey);
 
-      //TODO: client vs server projection
       queryBuilder.append("from '")
           .append(table)
           .append("' where id() >= '")
@@ -184,6 +196,7 @@ public class RavenDBClient extends DB {
 
       IndexQuery indexQuery = new IndexQuery(queryBuilder.toString());
       indexQuery.setPageSize(recordcount);
+      indexQuery.setWaitForNonStaleResults(true);
       QueryCommand queryCommand = new QueryCommand(store.getConventions(), indexQuery, false, false);
 
       store.getRequestExecutor().execute(queryCommand);
@@ -212,25 +225,51 @@ public class RavenDBClient extends DB {
 
   @Override
   public Status update(String table, String key, HashMap<String, ByteIterator> values) {
-    //TODO: replace all?
-    return insert(table, key, values);
+    return insertSingle(table, key, values);
   }
 
   @Override
   public Status insert(String table, String key, HashMap<String, ByteIterator> values) {
+    if (batchSize == 1){
+      return insertSingle(table, key, values);
+    }
+    return insertUsingBatch(table, key, values);
+  }
+
+  private Status insertSingle(String table, String key, HashMap<String, ByteIterator> values) {
     String documentId = documentId(table, key);
 
-    //TODO: support for batches?
     try {
-      ObjectNode node = toJson(values);
-      ObjectNode metadata = mapper.createObjectNode();
-      metadata.set(Constants.Documents.Metadata.COLLECTION, mapper.valueToTree(table));
-      node.set(Constants.Documents.Metadata.KEY, metadata);
+      ObjectNode node = toJson(values, table);
 
       PutDocumentCommand command = new PutDocumentCommand(documentId, null, node);
       store.getRequestExecutor().execute(command);
 
       return Status.OK;
+    } catch (Exception e) {
+      e.printStackTrace();
+      return Status.ERROR;
+    }
+  }
+
+  private Status insertUsingBatch(String table, String key, HashMap<String, ByteIterator> values) {
+    try {
+      String documentId = documentId(table, key);
+      ObjectNode document = toJson(values, table);
+
+      ICommandData command = new PutCommandDataWithJson(documentId, null, document);
+      bulkInserts.add(command);
+
+      if (bulkInserts.size() == batchSize) {
+
+        BatchCommand batchCommand = new BatchCommand(store.getConventions(), bulkInserts);
+        store.getRequestExecutor().execute(batchCommand);
+
+        bulkInserts.clear();
+        return Status.OK;
+      } else {
+        return Status.BATCHED_OK;
+      }
     } catch (Exception e) {
       e.printStackTrace();
       return Status.ERROR;
@@ -251,13 +290,17 @@ public class RavenDBClient extends DB {
     }
   }
 
-  protected static ObjectNode toJson(Map<String, ByteIterator> values)
+  protected static ObjectNode toJson(Map<String, ByteIterator> values, String collection)
       throws IOException {
     ObjectNode node = mapper.createObjectNode();
     HashMap<String, String> stringMap = StringByteIterator.getStringMap(values);
     for (Map.Entry<String, String> pair : stringMap.entrySet()) {
       node.put(pair.getKey(), pair.getValue());
     }
+
+    ObjectNode metadata = mapper.createObjectNode();
+    metadata.set(Constants.Documents.Metadata.COLLECTION, mapper.valueToTree(collection));
+    node.set(Constants.Documents.Metadata.KEY, metadata);
 
     return node;
   }
