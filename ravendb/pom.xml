@@ -32,8 +32,8 @@ LICENSE file.
   <dependencies>
    <dependency>
       <groupId>net.ravendb</groupId>
-      <artifactId>ravendb-client</artifactId>
-      <version>4.0.0-rc1</version>
+      <artifactId>ravendb</artifactId>
+      <version>4.0.0-rc2</version>
     </dependency>
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>
